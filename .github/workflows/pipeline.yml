@@ -1,0 +1,82 @@
+# Pipeline base de WordPress — Puesta en Producción Segura
+#
+# - CI: valida la configuración de Docker Compose (PR y push).
+# - Despliegue en las VM del aula: develop → desarrollo, release/** → preproducción,
+#   tags v* → producción (con aprobación).
+#
+# En B6 añadirás la verificación del servidor: testssl.sh, cabeceras de seguridad,
+# WPScan y Lynis.
+
+name: pipeline
+
+on:
+  pull_request:
+    branches: [develop, main, 'release/**']
+  push:
+    branches: [develop, 'release/**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validar:
+    name: Validar configuración
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: |
+          mkdir -p secrets certs
+          echo dummy > secrets/db_password.txt
+          touch certs/localhost.crt certs/localhost.key
+          docker compose -f compose.yml config --quiet
+      - name: Comprobar los scripts
+        run: bash -n deploy/deploy.sh && bash -n scripts/certificado-local.sh
+
+  deploy-dev:
+    name: Desplegar en desarrollo
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: validar
+    runs-on: [self-hosted, pps-dev]
+    environment: desarrollo
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desplegar
+        run: bash deploy/deploy.sh pps-dev.aula.lan
+        env:
+          ALUMNO: ${{ vars.ALUMNO }}
+          WP_DB_PASSWORD: ${{ secrets.WP_DB_PASSWORD }}
+
+  deploy-pre:
+    name: Desplegar en preproducción
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    needs: validar
+    runs-on: [self-hosted, pps-pre]
+    environment: preproduccion
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desplegar
+        run: bash deploy/deploy.sh pps-pre.aula.lan
+        env:
+          ALUMNO: ${{ vars.ALUMNO }}
+          WP_DB_PASSWORD: ${{ secrets.WP_DB_PASSWORD }}
+
+  deploy-pro:
+    name: Desplegar en producción
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: validar
+    runs-on: [self-hosted, pps-pro]
+    environment: produccion
+    steps:
+      - uses: actions/checkout@v4
+      - name: Desplegar
+        run: bash deploy/deploy.sh pps-pro.aula.lan
+        env:
+          ALUMNO: ${{ vars.ALUMNO }}
+          WP_DB_PASSWORD: ${{ secrets.WP_DB_PASSWORD }}

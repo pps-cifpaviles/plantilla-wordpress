@@ -1,0 +1,73 @@
+# WordPress detrás de un WAF (Nginx + ModSecurity v3 + OWASP CRS 4) con HTTPS.
+#
+# En tu equipo:   cp .env.example .env && scripts/certificado-local.sh && docker compose up -d
+# En las VM:      lo lanza deploy/deploy.sh desde el pipeline.
+
+services:
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wp
+      MARIADB_PASSWORD_FILE: /run/secrets/db_password
+      MARIADB_RANDOM_ROOT_PASSWORD: "1"
+    secrets: [db_password]
+    volumes:
+      - db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  wordpress:
+    image: wordpress:6-apache
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wp
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+      WORDPRESS_CONFIG_EXTRA: |
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_AUTO_UPDATE_CORE', 'minor');
+        if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') { $$_SERVER['HTTPS'] = 'on'; }
+    secrets: [db_password]
+    volumes:
+      - wp:/var/www/html
+    # Sin "ports": solo el WAF es accesible desde fuera
+    restart: unless-stopped
+
+  waf:
+    image: owasp/modsecurity-crs:nginx-alpine
+    depends_on:
+      - wordpress
+    environment:
+      BACKEND: http://wordpress:80
+      BLOCKING_PARANOIA: "1"
+      # DetectionOnly: registra pero no bloquea. En el Lab 6 lo pasarás a On.
+      MODSEC_RULE_ENGINE: ${MODSEC_RULE_ENGINE:-DetectionOnly}
+    volumes:
+      - ${CERT_DIR:-./certs}/${CERT_NAME:-localhost}.crt:/etc/nginx/conf/server.crt:ro
+      - ${CERT_DIR:-./certs}/${CERT_NAME:-localhost}.key:/etc/nginx/conf/server.key:ro
+      - ./config/modsecurity/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
+      - ./config/modsecurity/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:ro
+    ports:
+      - "${WP_HTTP_PORT:-8080}:8080"
+      - "${WP_HTTPS_PORT:-8443}:8443"
+    restart: unless-stopped
+
+secrets:
+  db_password:
+    file: ${DB_PASSWORD_FILE:-./secrets/db_password.txt}
+
+volumes:
+  db:
+    labels:
+      keep: "true"
+  wp:
+    labels:
+      keep: "true"
